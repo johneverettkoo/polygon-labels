@@ -84,7 +84,7 @@ polygon.labels <- function(polygon.df,
   foreach::foreach(id = id.vec, .combine = dplyr::bind_rows) %do% {
     # subset to just this polygon
     multipol.df <- polygon.df %>%
-      dplyr::filter_(paste0(label.col, ' == "', id, '"'))
+      dplyr::filter_(paste0(id.col, ' == "', id, '"'))
     
     # vector of sub-ids (for each piece)
     subid.vec <- unique(multipol.df[[subid.col]])
@@ -131,7 +131,7 @@ polygon.labels <- function(polygon.df,
     
     # also need the centroid
     centroid <- vertices.sp %>% 
-      rg$gCentroid()
+      rgeos::gCentroid()
     
     dplyr::data_frame(id, principal.angle, 
                       x = centroid$x, y = centroid$y)
@@ -158,3 +158,17 @@ midwest.plot <- ggplot() +
             aes(x = x, y = y, label = id, angle = principal.angle)) + 
   coord_map()
 midwest.plot
+
+ne.states <- c('maine', 'new\nhampshire', 'vermont', 
+               'massachusetts', 'connecticut', 'rhode\nisland')
+
+ne.df <- dp$filter(states.df, region %in% ne.states)
+ne.labels.df <- polygon.labels(ne.df, id.col = 'region', subid.col = 'group')
+
+ne.plot <- ggplot() + 
+  geom_polygon(data = ne.df, aes(x = long, y = lat, group = group), 
+               colour = 'black', fill = 'white') + 
+  geom_text(data = ne.labels.df, 
+            aes(x = x, y = y, label = id, angle = principal.angle)) + 
+  coord_map()
+ne.plot
