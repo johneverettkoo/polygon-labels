@@ -1,0 +1,375 @@
+---
+title: 'Using PCA to Identify the Orientation of Polygons'
+author: "John Koo"
+# output: pdf_document
+output: html_document
+urlcolor: blue
+header-includes:
+- \usepackage{float}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      comment = NA, 
+                      warning = FALSE, 
+                      message = FALSE, 
+                      fig.pos = 'H', 
+                      dpi = 300, 
+                      fig.align = 'center')
+```
+
+```{r example_image}
+example.image <- png::readPNG('~/dev/polygon-labels/FDI102A.png')
+grid::grid.raster(example.image)
+```
+
+# Motivating example
+
+When generating maps consisting of multiple regions with defined boundaries 
+(e.g., polygons), it's often times necessary to label the regions. A natural 
+method of labeling might be to just identify the centroid of each region and 
+place the labels (text) there. Depending on the specific shape of each region, 
+this may not work as intended. It may be more appropriate to rotate the text to 
+better fit the shape of the polygon. 
+
+In the following example, a map of New England is generated, and each state is 
+labeled.
+
+```{r no_angle_example, fig.height = 4}
+# packages used in this code:
+#  * magrittr
+#  * dplyr
+#  * ggplot2
+#  * import
+#  * rgeos
+#  * broom
+#  * foreach
+
+# load packages
+import::from(magrittr, `%>%`, `%$%`, extract)
+import::from(ggplot2, 
+             ggplot, geom_polygon, geom_text, geom_point, geom_segment, aes, 
+             coord_map, 
+             map_data)
+import::from(foreach, foreach, `%do%`)
+import::from(broom, tidy)
+dp <- loadNamespace('dplyr')
+rg <- loadNamespace('rgeos')
+
+#' @title Turn a data frame of vertices into a polygon/multipolygon
+#' @param input.df (data frame) Data frame of vertices, can contain multiple 
+#;   polygons
+#' @param x.col (character)
+#' @param y.col (character)
+#' @param polygon.col (character)
+#' @return (SpatialPolygons)
+df.to.sp <- function(input.df, x.col = 'long', y.col = 'lat', polygon.col) {
+  # separate out each polygon 
+  polygon.ids <- unique(input.df[[polygon.col]])
+  sapply(polygon.ids, function(pid) {
+    # subset input.df to each polygon
+    polygon.df <- input.df %>% 
+        dplyr::filter_(paste0(polygon.col, ' =="', pid, '"'))
+    # start compiling a WKT
+      paste(polygon.df[[x.col]], polygon.df[[y.col]]) %>% 
+        paste(collapse = ', ') %>% 
+        paste0('((', ., '))')
+  }) %>% 
+    paste(collapse = ', ') %>% 
+      paste0('MULTIPOLYGON(', ., ')') %>% 
+      rgeos::readWKT()
+}
+
+# state boundary data
+states.df <- map_data('state') %>% 
+  dp$mutate(region = gsub(' ', '\n', region))
+head(states.df)
+
+# vector of new england states
+ne.states <- c('massachusetts', 'connecticut', 'rhode\nisland', 
+               'vermont', 'new\nhampshire', 'maine')
+
+# data frame of new england states
+ne.df <- dp$filter(states.df, region %in% ne.states)
+
+# data frame of centroids
+#  1. convert each state into a spatial object
+#  2. use built-in spatial functions to find the centroid of each state
+#  3. compile into a data frame
+ne.labels.df <- foreach(ne.state = ne.states, .combine = dp$bind_rows) %do% {
+  temp.sp <- df.to.sp(dp$filter(ne.df, region == ne.state), 
+                      polygon.col = 'group')
+  temp.centroid <- rg$gCentroid(temp.sp)
+  data.frame(state = ne.state, 
+             long = temp.centroid$x, 
+             lat = temp.centroid$y, 
+             stringsAsFactors = FALSE)
+}
+
+# plot
+ggplot() + 
+  coord_map() + 
+  geom_polygon(data = ne.df, 
+               colour = 'black', fill = 'white', 
+               aes(x = long, y = lat, group = group)) + 
+  geom_text(data = ne.labels.df, 
+            aes(x = long, y = lat, label = state))
+```
+
+Looking at this plot, we might think that maybe the labels for New Hampshire 
+and Vermont should be rotated 90 degrees. We can do this manually:
+
+```{r manual_rotation}
+ggplot() + 
+  coord_map() + 
+  geom_polygon(data = ne.df, 
+               colour = 'black', fill = 'white', 
+               aes(x = long, y = lat, group = group)) + 
+  geom_text(data = ne.labels.df, 
+            aes(x = long, y = lat, label = state, 
+                angle = c(0, 0, 0, 90, 90, 0)))
+```
+
+(We can also see that perhaps the centroid might not be the best choice for the 
+position of the label.)
+
+Ideally, this would be done automatically/algorithmically. In order to come up 
+with a method, we might want to think about the polygons as "pointing" in a 
+certain direction. Vermont and New Hampshire point up and down, and 
+Massachusetts and Connecticut point left to right. Maine points 45 degrees 
+(although we might still want to have the label horizontal), and Rhode Island is 
+relatively square/spherical. 
+
+# Method
+
+Let's look at one state that is clearly neither horizontal nor vertical. This 
+time, instead of looking at the polygon, let's focus on the vertices.
+
+```{r ca_plot}
+ca.df <- dp$filter(states.df, region == 'california')
+ca.plot <- ggplot(ca.df) + 
+  geom_point(aes(x = long, y = lat), size = .1) + 
+  coord_map()
+ca.plot
+```
+
+If we think of the vertices as Euclidean data, we can say that there is some 
+correlation. Then, similar to the Principal Component Analysis method, we can 
+rotate our coordinates to reduce the correlation. 
+
+```{r ca_rotate}
+# pca on the vertices
+ca.pca <- ca.df %>% 
+  dp$select(long, lat) %>% 
+  princomp()
+ca.pca$loadings
+
+# we also want the centroid
+ca.sp <- df.to.sp(ca.df, polygon.col = 'group')
+ca.centroid <- rg$gCentroid(ca.sp)
+
+ca.plot + 
+  geom_segment(aes(x = ca.centroid$x, 
+                   xend = ca.centroid$x + ca.pca$loadings[1, 1] * ca.pca$sdev[1], 
+                   y = ca.centroid$y, 
+                   yend = ca.centroid$y + ca.pca$loadings[2, 1] * ca.pca$sdev[1]), 
+               colour = 'red') + 
+  geom_segment(aes(x = ca.centroid$x, 
+                   xend = ca.centroid$x + ca.pca$loadings[1, 2] * ca.pca$sdev[2], 
+                   y = ca.centroid$y, 
+                   yend = ca.centroid$y + ca.pca$loadings[2, 2] * ca.pca$sdev[2]), 
+               colour = 'red')
+```
+
+So we want the angle of the first principal component.
+
+```{r ca_angle}
+ca.angle <- atan2(ca.pca$loadings[2, 1], 
+                  ca.pca$loadings[1, 1])
+ca.angle
+ca.angle.deg <- ca.angle * 180 / pi
+ca.angle.deg
+
+ggplot(ca.df) + 
+  coord_map() + 
+  geom_polygon(aes(x = long, y = lat, group = group), 
+               colour = 'black', fill = 'white') + 
+  geom_text(aes(x = ca.centroid$x, y = ca.centroid$y, 
+                label = 'california', angle = ca.angle.deg))
+```
+
+And to make things more readable:
+
+```{r ca_angle_corrected}
+ca.angle.deg <- ca.angle.deg + 180
+ca.angle.deg
+
+ggplot(ca.df) + 
+  coord_map() + 
+  geom_polygon(aes(x = long, y = lat, group = group), 
+               colour = 'black', fill = 'white') + 
+  geom_text(aes(x = ca.centroid$x, y = ca.centroid$y, 
+                label = 'california', angle = ca.angle.deg))
+```
+
+## Additional Consideration
+
+This method can break down easily when the points are not uniformly spaced 
+around the polygon and when the polygon is not convex. Although are true here, 
+in this case the method still behaves well, but we can easily come up with 
+examples where this breaks down. To alleviate some (but certainly not all) of 
+this, we can simplify the polygon by looking at its convex hull (and this 
+functionality is built into the `rgeos` package already, so we don't have to 
+really do anything extra). 
+
+So this time, we first take the convex hull of the original polygon, compile 
+the new vertices into a data matrix, perform principal component analysis on 
+the new vertices, and then compute the angle of the first component. 
+
+```{r convex_hull}
+ca.convex.hull.sp <- rg$gConvexHull(ca.sp)
+
+# we don't want to change the centroid, but we want to recompute the angle
+# so instead of using the original set of vertices, obtain a set of vertices 
+# the convex hull (again, package functions)
+ca.convex.hull.df <- tidy(ca.convex.hull.sp)
+ca.convex.hull.pca <- ca.convex.hull.df %>% 
+  dp$select(long, lat) %>% 
+  princomp()
+new.loadings <- ca.convex.hull.pca$loadings
+
+new.angle <- atan2(new.loadings[2, 1], 
+                   new.loadings[1, 1]) * 180 / pi + 180
+new.angle
+
+ggplot(ca.df) + 
+  coord_map() + 
+  geom_polygon(aes(x = long, y = lat, group = group), 
+               colour = 'black', fill = 'white') + 
+  geom_text(aes(x = ca.centroid$x, y = ca.centroid$y, 
+                label = 'california', angle = new.angle))
+```
+
+In this case, there isn't much of a change since most of the original vertices 
+lie along the western border, which follows the same general shape as the 
+polygon.
+
+# Implementation
+
+```{r function}
+#' @title Assign angles and centroids for polygon labels
+#' @description Given a tidy data frame of polygons or multipolygons, find the 
+#'   centroid and approximate orientation using principal component analysis to 
+#'   automatically come up with a nice way to label the polygons on a map.
+#' @param polygon.df (data frame) A tidy data frame containing (multi)poygon 
+#'   vertices and labels
+#' @param x.col (character)
+#' @param y.col (character)
+#' @param id.col (character)
+#' @param subid.col (character)
+#' @return (data frame)
+polygon.labels <- function(polygon.df, 
+                           x.col = 'long', y.col = 'lat', 
+                           id.col, subid.col) {
+  # find vector of (multi)polygon ids
+  id.vec <- unique(polygon.df[[id.col]])
+  
+  foreach::foreach(id = id.vec, .combine = dplyr::bind_rows) %do% {
+    # subset to just this polygon
+    multipol.df <- polygon.df %>%
+      dplyr::filter_(paste0(id.col, ' == "', id, '"'))
+    
+    # vector of sub-ids (for each piece)
+    subid.vec <- unique(multipol.df[[subid.col]])
+    
+    # construct a spatial object for the id
+    vertices.sp <- foreach::foreach(subid = subid.vec, .combine = c) %do% {
+      pol.df <- multipol.df %>% 
+        dplyr::filter_(paste0(subid.col, ' =="', subid, '"'))
+      paste(pol.df[[x.col]], pol.df[[y.col]]) %>% 
+        paste(collapse = ', ') %>% 
+        paste0('((', ., '))')
+    } %>% 
+      paste(collapse = ', ') %>% 
+      paste0('MULTIPOLYGON(', ., ')') %>% 
+      rgeos::readWKT()
+    
+    # PCA on vertices to determine the centroid
+    # note that we're starting with vertices.sp instead of multipol.df
+    # so we can do some simplification first
+    # then find the angle of the first component
+    principal.angle <- vertices.sp %>% 
+      # simplify a bit (WIP)
+      rgeos::gConvexHull() %>% 
+      # turn into long data frame
+      broom::tidy() %>% 
+      # only want spatial coordinates
+      dplyr::select(long, lat) %>% 
+      # remove repeats (e.g., opening and ending of polygon)
+      dplyr::distinct() %>% 
+      cov() %>% 
+      eigen() %$%
+      vectors %>% 
+      extract(1:2) %>% 
+      rev() %>% 
+      as.list() %>% 
+      do.call(atan2, .) %>% 
+      {. * 180 / pi + 180}
+    
+    # adjust the angle for better readability
+    # it should go from pi / 4 to 9 pi / 4
+    if (principal.angle > 180 & principal.angle < 270) {
+      principal.angle <- principal.angle + 180
+    }
+    
+    # also need the centroid
+    centroid <- vertices.sp %>% 
+      rgeos::gCentroid()
+    
+    dplyr::data_frame(id, principal.angle, 
+                      x = centroid$x, y = centroid$y)
+  }
+}
+
+midwest.states <- c('indiana', 'ohio', 'illinois', 'wisconsin', 'michigan', 
+                    'minnesota', 'iowa', 'missouri', 'kansas', 'nebraska', 
+                    'north\ndakota', 'south\ndakota')
+
+midwest.df <- dp$filter(states.df, region %in% midwest.states)
+midwest.labels.df <- polygon.labels(midwest.df, 
+                                    id.col = 'region', subid.col = 'group')
+
+midwest.plot <- ggplot() + 
+  geom_polygon(data = midwest.df, 
+               aes(x = long, y = lat, group = group), 
+               colour = 'black', fill = 'white') + 
+  geom_text(data = midwest.labels.df, 
+            aes(x = x, y = y, label = id, angle = principal.angle)) + 
+  coord_map()
+midwest.plot
+
+ne.states <- c('maine', 'new\nhampshire', 'vermont', 
+               'massachusetts', 'connecticut', 'rhode\nisland')
+
+ne.df <- dp$filter(states.df, region %in% ne.states)
+ne.labels.df <- polygon.labels(ne.df, id.col = 'region', subid.col = 'group')
+
+ne.plot <- ggplot() + 
+  geom_polygon(data = ne.df, aes(x = long, y = lat, group = group), 
+               colour = 'black', fill = 'white') + 
+  geom_text(data = ne.labels.df, 
+            aes(x = x, y = y, label = id, angle = principal.angle)) + 
+  coord_map()
+ne.plot
+```
+
+Cases where this was unsuccessful (or not as successful as we would like):
+
+* Large states for which a horizontal label would fit regardless of the shape or
+orientation (e.g., Maine, Missouri)
+* States with a "slight" angle (e.g., Massachusetts, North Dakota)---perhaps in 
+these cases it would be better to "snap" to 0 degrees
+* States for which the centroid is not the optimal location of the label (e.g., 
+Michigan, Massachusetts)
+* States where even the convex hull is not sufficiently simple (e.g., Indiana)
+* States that are not sufficiently ellipsoid-shape (e.g., Minnesota, Missouri)

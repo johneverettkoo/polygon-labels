@@ -1,4 +1,3 @@
-# Automatically identifying which way labels for polygons should be oriented
+# Using PCA to identify the orientation of polygons
 
-
-Based on principal component analysis
+[Link to the generated HTML](https://johneverettkoo.github.io/polygon-labels.html)
